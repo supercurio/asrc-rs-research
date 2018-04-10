@@ -188,12 +188,16 @@ fn main() {
 
     loop {
         if let Some(pcm_c) = handle_c.as_ref() {
-            pcm_c.wait(None).unwrap();
+            if let Err(e) = pcm_c.wait(None) {
+                eprintln!("Recovering from Capture wait error");
+                pcm_c.try_recover(e, false).unwrap();
+                pcm_c.start().unwrap();
+                xruns_c.fetch_add(1, Ordering::SeqCst);
+            }
 
             let io = pcm_c.io_i16().unwrap();
-            let res = io.readi(&mut buffer_c);
 
-            match res {
+            match io.readi(&mut buffer_c) {
                 Ok(len) => {
                     *frames_count_p.lock().unwrap() += len as u64;
                     if args.flag_ts_freq == 0.0 {
@@ -214,8 +218,7 @@ fn main() {
         if let Some(pcm_p) = handle_p.as_ref() {
             let io = pcm_p.io_i16().unwrap();
 
-            let res = io.writei(&buffer_p);
-            match res {
+            match io.writei(&buffer_p) {
                 Ok(len) => {
                     *frames_count_p.lock().unwrap() += len as u64;
                     if args.flag_ts_freq == 0.0 {
