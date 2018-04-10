@@ -14,10 +14,11 @@ use std::time::Duration;
 use std::process;
 use docopt::Docopt;
 use alsa::{Direction, ValueOr};
-use alsa::pcm::{PCM, HwParams, Format, Access, Status, State};
+use alsa::pcm::{PCM, HwParams, Format, Access, Status};
 use libc::timespec;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const USAGE: &str = "
 ALSA audio_time in Rust
@@ -100,6 +101,8 @@ fn main() {
     let mut handle_c: Option<Arc<PCM>> = None;
     let mut buffer_c = vec![0i16; (period_size * periods * CHANNELS) as usize];
     let buffer_p = vec![0i16; (period_size * periods * CHANNELS) as usize];
+    let xruns_p = Arc::new(AtomicUsize::new(0));
+    let xruns_c = Arc::new(AtomicUsize::new(0));
     let frames_count_p: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let frames_count_c: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
@@ -127,6 +130,35 @@ fn main() {
     }
 
 
+    if args.flag_ts_freq != 0.0 {
+        let timestamp_freq = args.flag_ts_freq;
+        let handle_p_clone = handle_p.clone();
+        let handle_c_clone = handle_c.clone();
+        let frames_count_p_clone = frames_count_p.clone();
+        let frames_count_c_clone = frames_count_c.clone();
+        let xruns_p_clone = xruns_p.clone();
+        let xruns_c_clone = xruns_c.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(1));
+            let sleep_duration = Duration::new(0, (1e9 / timestamp_freq) as u32);
+            loop {
+                thread::sleep(sleep_duration);
+                if let Some(pcm_c) = handle_c_clone.as_ref() {
+                    eprint!("Capture   xruns: {}  ", xruns_c_clone.load(Ordering::Relaxed));
+                    let frames_count_lock = frames_count_c_clone.lock().unwrap();
+                    let status = pcm_c.status().unwrap();
+                    print_timestamp(&status, *frames_count_lock);
+                }
+                if let Some(pcm_p) = handle_p_clone.as_ref() {
+                    eprint!("Playback  xruns: {}  ", xruns_p_clone.load(Ordering::Relaxed));
+                    let frames_count_lock = frames_count_p_clone.lock().unwrap();
+                    let status = pcm_p.status().unwrap();
+                    print_timestamp(&status, *frames_count_lock);
+                }
+            };
+        });
+    }
+
     if PCM_LINK {
         if let (Some(_pcm_p), Some(_pcm_c)) = (handle_p.as_ref(),
                                                handle_c.as_ref()) {
@@ -152,34 +184,6 @@ fn main() {
         }
     }
 
-
-    if args.flag_ts_freq != 0.0 {
-        let timestamp_freq = args.flag_ts_freq;
-        let handle_p_clone = handle_p.clone();
-        let handle_c_clone = handle_c.clone();
-        let frames_count_p_clone = frames_count_p.clone();
-        let frames_count_c_clone = frames_count_c.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(1));
-            let sleep_duration = Duration::new(0, (1e9 / timestamp_freq) as u32);
-            loop {
-                thread::sleep(sleep_duration);
-                if let Some(pcm_c) = handle_c_clone.as_ref() {
-                    eprint!("Capture   ");
-                    let frames_count_lock = frames_count_c_clone.lock().unwrap();
-                    let status = pcm_c.status().unwrap();
-                    print_timestamp(&status, *frames_count_lock);
-                }
-                if let Some(pcm_p) = handle_p_clone.as_ref() {
-                    eprint!("Playback  ");
-                    let frames_count_lock = frames_count_p_clone.lock().unwrap();
-                    let status = pcm_p.status().unwrap();
-                    print_timestamp(&status, *frames_count_lock);
-                }
-            };
-        });
-    }
-
     realtime_priority::get_realtime_priority();
 
     loop {
@@ -187,28 +191,44 @@ fn main() {
             pcm_c.wait(None).unwrap();
 
             let io = pcm_c.io_i16().unwrap();
-            *frames_count_p.lock().unwrap() += io.readi(&mut buffer_c).unwrap() as u64;
+            let res = io.readi(&mut buffer_c);
 
-            if args.flag_ts_freq == 0.0 {
-                eprint!("Capture   ");
-                let status = pcm_c.status().unwrap();
-                print_timestamp(&status, *frames_count_p.lock().unwrap());
+            match res {
+                Ok(len) => {
+                    *frames_count_p.lock().unwrap() += len as u64;
+                    if args.flag_ts_freq == 0.0 {
+                        eprint!("Capture   xruns: {}  ", xruns_c.load(Ordering::SeqCst));
+                        let status = pcm_c.status().unwrap();
+                        print_timestamp(&status, *frames_count_p.lock().unwrap());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Recovering from Capture error");
+                    pcm_c.try_recover(e, false).unwrap();
+                    pcm_c.start().unwrap();
+                    xruns_c.fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
 
         if let Some(pcm_p) = handle_p.as_ref() {
             let io = pcm_p.io_i16().unwrap();
 
-            let state = pcm_p.state();
-            if state != State::Running {
-                eprintln!("state: {:?}", state);
-            }
-            *frames_count_p.lock().unwrap() += io.writei(&buffer_p).unwrap() as u64;
-
-            if args.flag_ts_freq == 0.0 {
-                eprint!("Playback  ");
-                let status = pcm_p.status().unwrap();
-                print_timestamp(&status, *frames_count_p.lock().unwrap());
+            let res = io.writei(&buffer_p);
+            match res {
+                Ok(len) => {
+                    *frames_count_p.lock().unwrap() += len as u64;
+                    if args.flag_ts_freq == 0.0 {
+                        eprint!("Playback  xruns: {}  ", xruns_p.load(Ordering::SeqCst));
+                        let status = pcm_p.status().unwrap();
+                        print_timestamp(&status, *frames_count_p.lock().unwrap());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Recovered from Playback error");
+                    pcm_p.try_recover(e, false).unwrap();
+                    xruns_p.fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
     }
