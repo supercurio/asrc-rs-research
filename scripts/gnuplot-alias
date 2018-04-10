@@ -1,0 +1,2 @@
+alias gp='gnuplot -p -c'
+echo "Use gp"

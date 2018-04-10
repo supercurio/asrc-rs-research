@@ -1,0 +1,41 @@
+[package]
+name = "asrc-rs"
+version = "0.1.0"
+authors = ["François Simond <dev@supercur.io>"]
+
+[dependencies]
+serde = "1"
+serde_derive = "1"
+docopt = "0.8"
+time = "0.1"
+rustfft = "2"
+rb = "0.3.1"
+libc = "0.2"
+thread-priority = "0.1.0"
+
+
+[target.'cfg(target_os="linux")'.dependencies]
+#alsa = "0.2"
+alsa = { path = "alsa-rs" }
+alsa-sys = "0.1"
+
+[[bin]]
+name = "alsa-period-timings"
+path = "src/alsa_period_timings.rs"
+
+[[bin]]
+name = "analysis"
+path = "src/analysis.rs"
+
+[[bin]]
+name = "alsa-asrc-loopback"
+path = "src/alsa_asrc_loopback.rs"
+
+[[bin]]
+name = "alsa-simple-loopback"
+path = "src/alsa_simple_loopback.rs"
+
+[[bin]]
+name = "alsa-audio-time"
+path = "src/alsa_audio_time.rs"
+
