@@ -39,3 +39,7 @@ path = "src/alsa_simple_loopback.rs"
 name = "alsa-audio-time"
 path = "src/alsa_audio_time.rs"
 
+[[bin]]
+name = "alsa-direct-status-test"
+path = "src/alsa_direct_status_test.rs"
+

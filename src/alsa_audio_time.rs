@@ -9,22 +9,19 @@ extern crate libc;
 
 mod realtime_priority;
 
-use std::thread;
-use std::time::Duration;
 use std::process;
 use docopt::Docopt;
 use alsa::{Direction, ValueOr};
 use alsa::pcm::{PCM, HwParams, Format, Access, Status};
 use libc::timespec;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::fs::File;
+use std::io::prelude::*;
 
 const USAGE: &str = "
 ALSA audio_time in Rust
 
 Usage:
-  alsa-audio-time [-p -c -D <device> -t <type> -r <Hz> -s <frames> -o <periods> -f <Hz>]
+  alsa-audio-time [-p -c -D <device> -t <type> -r <Hz> -s <frames> -o <periods> -w <fname>]
   alsa-audio-time (-h | --help)
 
 Options:
@@ -34,10 +31,10 @@ Options:
   -D --device=<device>          Select ALSA device [default: hw:0,0].
   -d --delay=<enable>           Enable delay compensation [default: false]
   -t --ts-type=<type>           Default(0),link(1),link_estimated(2),synchronized(3) [default: 0].
-  -f --ts-freq=<Hz>             Timestamp Frequency [default: 0].
   -s --period-size=<frames>     Period size in frames [default: 256].
   -o --periods=<count>          Periods [default: 4].
   -r --sample-rate=<Hz>         Recording sample rate [default: 48000].
+  -w --write-to-file=<fname>    Write timestamps to file.
 ";
 
 const CHANNELS: u32 = 2;
@@ -50,11 +47,11 @@ struct Args {
     flag_capture: bool,
     flag_device: String,
     flag_ts_type: u32,
-    flag_ts_freq: f64,
     flag_period_size: u32,
     flag_periods: u32,
     flag_delay: bool,
     flag_sample_rate: u32,
+    flag_write_to_file: Option<String>,
 }
 
 #[derive(Debug)]
@@ -63,6 +60,12 @@ enum TimeStampType {
     Link,
     LinkEstimated,
     Synchronized,
+}
+
+struct PreviousStatus {
+    audio_htstamp: timespec,
+    htstamp: timespec,
+    captured_frames: u64,
 }
 
 fn main() {
@@ -97,16 +100,18 @@ fn main() {
     eprintln!("Periods:        {}", periods);
     eprintln!("Sample rate:    {}", args.flag_sample_rate);
 
-    let mut handle_p: Option<Arc<PCM>> = None;
-    let mut handle_c: Option<Arc<PCM>> = None;
+    let mut handle_p: Option<PCM> = None;
+    let mut handle_c: Option<PCM> = None;
     let mut buffer_c = vec![0i16; (period_size * periods * CHANNELS) as usize];
     let buffer_p = vec![0i16; (period_size * periods * CHANNELS) as usize];
-    let xruns_p = Arc::new(AtomicUsize::new(0));
-    let xruns_c = Arc::new(AtomicUsize::new(0));
-    let frames_count_p: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-    let frames_count_c: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let mut xruns_p = 0;
+    let mut xruns_c = 0;
+    let mut frames_count_p: u64 = 0;
+    let mut frames_count_c: u64 = 0;
+    let mut last_status_c: Option<PreviousStatus> = None;
+    let mut last_status_p: Option<PreviousStatus> = None;
 
-    // let q : () = handle_p;
+    let mut out_file = args.flag_write_to_file.map(|f| File::create(f).unwrap());
 
     if args.flag_playback {
         let mut pcm = PCM::new(&args.flag_device, Direction::Playback, false).unwrap();
@@ -120,43 +125,13 @@ fn main() {
             pcm.sw_params(&swp).unwrap();
         }
 
-        handle_p = Some(Arc::new(pcm));
+        handle_p = Some(pcm);
     }
 
     if args.flag_capture {
         let mut pcm = PCM::new(&args.flag_device, Direction::Capture, false).unwrap();
         set_params(&mut pcm, args.flag_sample_rate, period_size, periods);
-        handle_c = Some(Arc::new(pcm));
-    }
-
-
-    if args.flag_ts_freq != 0.0 {
-        let timestamp_freq = args.flag_ts_freq;
-        let handle_p_clone = handle_p.clone();
-        let handle_c_clone = handle_c.clone();
-        let frames_count_p_clone = frames_count_p.clone();
-        let frames_count_c_clone = frames_count_c.clone();
-        let xruns_p_clone = xruns_p.clone();
-        let xruns_c_clone = xruns_c.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(1));
-            let sleep_duration = Duration::new(0, (1e9 / timestamp_freq) as u32);
-            loop {
-                thread::sleep(sleep_duration);
-                if let Some(pcm_c) = handle_c_clone.as_ref() {
-                    eprint!("Capture   xruns: {}  ", xruns_c_clone.load(Ordering::Relaxed));
-                    let frames_count_lock = frames_count_c_clone.lock().unwrap();
-                    let status = pcm_c.status().unwrap();
-                    print_timestamp(&status, *frames_count_lock);
-                }
-                if let Some(pcm_p) = handle_p_clone.as_ref() {
-                    eprint!("Playback  xruns: {}  ", xruns_p_clone.load(Ordering::Relaxed));
-                    let frames_count_lock = frames_count_p_clone.lock().unwrap();
-                    let status = pcm_p.status().unwrap();
-                    print_timestamp(&status, *frames_count_lock);
-                }
-            };
-        });
+        handle_c = Some(pcm);
     }
 
     if PCM_LINK {
@@ -172,7 +147,7 @@ fn main() {
             let io = pcm_p.io_i16().unwrap();
             for _ in 0..periods {
                 let frames = io.writei(&buffer_p).unwrap() as u64;
-                *frames_count_p.lock().unwrap() += frames;
+                frames_count_p += frames;
             }
         }
     }
@@ -192,25 +167,30 @@ fn main() {
                 eprintln!("Recovering from Capture wait error");
                 pcm_c.try_recover(e, false).unwrap();
                 pcm_c.start().unwrap();
-                xruns_c.fetch_add(1, Ordering::SeqCst);
+                xruns_c += 1;
+                frames_count_c = 0;
+                last_status_c = None;
             }
 
             let io = pcm_c.io_i16().unwrap();
 
             match io.readi(&mut buffer_c) {
                 Ok(len) => {
-                    *frames_count_p.lock().unwrap() += len as u64;
-                    if args.flag_ts_freq == 0.0 {
-                        eprint!("Capture   xruns: {}  ", xruns_c.load(Ordering::SeqCst));
-                        let status = pcm_c.status().unwrap();
-                        print_timestamp(&status, *frames_count_p.lock().unwrap());
+                    frames_count_c += len as u64;
+                    eprint!("Capture   xruns: {}  ", xruns_c);
+                    let status = pcm_c.status().unwrap();
+                    if let Some(file) = out_file.as_mut() {
+                        write_timestamp_capture(file, &status, &mut last_status_c, frames_count_c);
                     }
+                    print_timestamp(&status, frames_count_c);
                 }
                 Err(e) => {
                     eprintln!("Recovering from Capture error");
                     pcm_c.try_recover(e, false).unwrap();
                     pcm_c.start().unwrap();
-                    xruns_c.fetch_add(1, Ordering::SeqCst);
+                    xruns_c += 1;
+                    frames_count_c = 0;
+                    last_status_c = None;
                 }
             }
         }
@@ -220,17 +200,20 @@ fn main() {
 
             match io.writei(&buffer_p) {
                 Ok(len) => {
-                    *frames_count_p.lock().unwrap() += len as u64;
-                    if args.flag_ts_freq == 0.0 {
-                        eprint!("Playback  xruns: {}  ", xruns_p.load(Ordering::SeqCst));
-                        let status = pcm_p.status().unwrap();
-                        print_timestamp(&status, *frames_count_p.lock().unwrap());
+                    frames_count_p += len as u64;
+                    eprint!("Playback  xruns: {}  ", xruns_p);
+                    let status = pcm_p.status().unwrap();
+                    if let Some(file) = out_file.as_mut() {
+                        write_timestamp_playback(file, &status, frames_count_p);
                     }
+                    print_timestamp(&status, frames_count_p);
                 }
                 Err(e) => {
                     eprintln!("Recovered from Playback error");
                     pcm_p.try_recover(e, false).unwrap();
-                    xruns_p.fetch_add(1, Ordering::SeqCst);
+                    xruns_p += 1;
+                    frames_count_p = 0;
+                    last_status_p = None;
                 }
             }
         }
@@ -262,10 +245,77 @@ fn print_timestamp(status: &Status, frames_count: u64) {
     eprint!("avail: {:5}  ", status.get_avail());
     eprint!("avail_max: {:5}  ", status.get_avail_max());
     eprint!("frames: {}  ", frames_count);
-    eprint!("audio_htstamp: {}  ", format_timespec(status.get_audio_htstamp()));
-    eprintln!("htstamp: {}", format_timespec(status.get_htstamp()));
+
+    let audio_htstamp = timespec_f64(status.get_audio_htstamp());
+    let trigger_htstamp = timespec_f64(status.get_trigger_htstamp());
+    let htstamp = timespec_f64(status.get_htstamp());
+    let drift = htstamp - trigger_htstamp - audio_htstamp;
+
+    eprint!("audio_htstamp: {:<18}  ", audio_htstamp);
+    eprint!("trigger_htstamp: {:<18}  ", trigger_htstamp);
+    eprint!("htstamp: {:<18}", htstamp);
+    eprintln!("drift: {:<18}", drift);
 }
 
-fn format_timespec(ts: timespec) -> String {
-    format!("{}.{:<9}", ts.tv_sec as u64, ts.tv_nsec as u64)
+fn write_timestamp_capture(file: &mut File,
+                           status: &Status,
+                           last_status: &mut Option<PreviousStatus>,
+                           frames_count: u64) {
+    let audio_elapsed = timespec_f64(status.get_audio_htstamp());
+    let trigger_tstamp = timespec_f64(status.get_trigger_htstamp());
+    let system_tstamp = timespec_f64(status.get_htstamp());
+
+    let system_elapsed = system_tstamp - trigger_tstamp;
+    let captured_frames = frames_count + status.get_delay() as u64;
+
+    if let Some(last_status) = last_status.as_ref() {
+        let captured_frames_from_last = captured_frames - last_status.captured_frames;
+        let system_elapsed_from_last = system_tstamp - timespec_f64(last_status.htstamp);
+        let audio_elapsed_from_last = audio_elapsed - timespec_f64(last_status.audio_htstamp);
+
+        let audio_rate_instant = captured_frames_from_last as f64 / audio_elapsed_from_last;
+        let system_rate_instant = captured_frames_from_last as f64 / system_elapsed_from_last;
+
+        let drift = system_tstamp - trigger_tstamp - audio_elapsed;
+
+        // write!(file, "{} ", audio_elapsed).unwrap();
+        // write!(file, "{} ", captured_frames).unwrap();
+        // write!(file, "{} ", audio_rate_instant).unwrap();
+        // write!(file, "{} ", system_rate_instant).unwrap();
+        writeln!(file, "{}", system_rate_instant).unwrap();
+        // write!(file, "{} ", audio_rate_instant / system_rate_instant).unwrap();
+        // write!(file, "{} ", 48000.0 / system_rate_instant).unwrap();
+        //writeln!(file, "{}", drift).unwrap();
+    }
+
+    let saved_status = PreviousStatus {
+        audio_htstamp: status.get_audio_htstamp(),
+        htstamp: status.get_htstamp(),
+        captured_frames,
+    };
+    *last_status = Some(saved_status);
+}
+
+fn write_timestamp_playback(file: &mut File, status: &Status, frames_count: u64) {
+    let audio_elapsed = timespec_f64(status.get_audio_htstamp());
+    let trigger_tstamp = timespec_f64(status.get_trigger_htstamp());
+    let system_tstamp = timespec_f64(status.get_htstamp());
+
+    let system_elapsed = system_tstamp - trigger_tstamp;
+    let played_frames = audio_elapsed * 48000.0;
+
+    let audio_rate = played_frames as f64 / audio_elapsed;
+    let system_rate = played_frames as f64 / system_elapsed;
+
+    let drift = system_tstamp - trigger_tstamp - audio_elapsed;
+
+    write!(file, "{} ", system_elapsed).unwrap();
+    write!(file, "{} ", played_frames).unwrap();
+    write!(file, "{} ", audio_rate).unwrap();
+    write!(file, "{} ", system_rate).unwrap();
+    writeln!(file, "{}", drift).unwrap();
+}
+
+fn timespec_f64(ts: timespec) -> f64 {
+    ts.tv_sec as f64 + (ts.tv_nsec as f64) / 1e9
 }

@@ -123,7 +123,8 @@ fn main() {
     let period_count: u32 = s[s.len() - 1].parse().unwrap();
     let period_time = 1.0 / sample_rate as f64 * period_size as f64;
 
-    eprintln!("period_size: {}, period_count: {}, period_time {}",
+    eprintln!("sample rate: {}, period_size: {}, period_count: {}, period_time {}",
+              sample_rate,
               period_size,
               period_count,
               period_time);
@@ -133,16 +134,17 @@ fn main() {
     let mut contents = String::new();
     buf_reader.read_to_string(&mut contents).unwrap();
 
-    let skip_seconds = 0.5;
-    let fade_seconds = 1.0;
+    let skip_seconds = 0.0;
+    let fade_seconds = 0.0;
 
     let skip = (sample_rate as f64 * skip_seconds / period_size as f64) as usize;
     let fade = (sample_rate as f64 * fade_seconds / period_size as f64) as usize;
 
     let mut data: Vec<f64> = contents
         .lines()
-        .map(|l| l.parse().unwrap())
+        .map(|l| l.trim().parse().unwrap())
         .skip(skip)
+        .map(|v: f64| v - sample_rate as f64)
         .collect();
 
     // fade in the data
@@ -161,10 +163,7 @@ fn main() {
     /*
      * Biquad 1
      */
-    let magic = period_time / 20.0;
-    // let magic =  0.00004;
-    // let magic = 40.0 / 1e6;
-    println!("magic * 48000 : {}", magic * 48000.0);
+    let magic = period_time / 15.0;
     let q = std::f64::consts::FRAC_1_SQRT_2;
 
     let mut bq = get_biquad(magic, q);
@@ -178,15 +177,13 @@ fn main() {
      * Biquad 2
      */
 
-    /*
-        let magic = period_size as f64 / sample_rate as f64 / 10.0;
-        let q = std::f64::consts::FRAC_1_SQRT_2;
+    let magic = period_time / 3.0;
+    let q = std::f64::consts::FRAC_1_SQRT_2;
 
-        let mut bq = get_biquad(magic, q);
+    let mut bq = get_biquad(magic, q);
 
-        dsp::iir(&filtered_data.clone(), &mut filtered_data, &mut bq);
-        let fft = get_fft(&filtered_data);
-        write_data(&args.arg_filtered_2, &filtered_data, period_time);
-        write_fft(&args.arg_filtered_fft_2, &fft);
-    */
+    dsp::iir(&filtered_data.clone(), &mut filtered_data, &mut bq);
+    let fft = get_fft(&filtered_data);
+    write_data(&args.arg_filtered_2, &filtered_data, period_time);
+    write_fft(&args.arg_filtered_fft_2, &fft);
 }

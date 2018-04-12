@@ -158,31 +158,3 @@ fn card_vs_systime(mut rec_buf: Vec<i16>,
         }
     }
 }
-
-fn time_average(mut rec_buf: Vec<i16>, io: IO<i16>, sample_rate: u32) {
-    let mut captured_sample_count: u64 = 0;
-    let mut start_ns = 0;
-
-    loop {
-        let read = io.readi(rec_buf.as_mut_slice());
-        match read {
-            Ok(size) => {
-                if start_ns == 0 {
-                    start_ns = time::precise_time_ns();
-                    captured_sample_count = 0;
-                    continue;
-                }
-
-                let time_ref = time::precise_time_ns() - start_ns;
-                captured_sample_count += size as u64;
-
-                let time_ref_sample_count = time_ref as f64 * 1e-9 * sample_rate as f64;
-                let ratio = captured_sample_count as f64 / time_ref_sample_count;
-
-// println!("{} {}", time_ref_sample_count, captured_sample_count);
-                println!("{} 1", ratio);
-            }
-            Err(e) => eprintln!("Error: {}", e),
-        };
-    }
-}
