@@ -95,7 +95,7 @@ fn main() {
             pcm.sw_params(&swp).unwrap();
         }
 
-        pcm_fd_p = Some(alsa::direct::pcm::pcm_to_fd(&pcm).unwrap());
+        pcm_fd_p = Some(pcm_to_fd(&pcm).unwrap());
         if cfg!(target_arch = "x86_64" ) {
             status_p = Some(Status::new(&pcm).unwrap());
         }
@@ -106,7 +106,7 @@ fn main() {
         let mut pcm = PCM::new(&args.flag_device, Direction::Capture, false).unwrap();
         set_params(&mut pcm, args.flag_sample_rate, period_size, periods);
 
-        pcm_fd_c = Some(alsa::direct::pcm::pcm_to_fd(&pcm).unwrap());
+        pcm_fd_c = Some(pcm_to_fd(&pcm).unwrap());
 
         if cfg!(target_arch = "x86_64" ) {
             status_c = Some(Status::new(&pcm).unwrap());
@@ -213,4 +213,17 @@ fn print_status(status: &Status) {
 
 fn timespec_f64(ts: timespec) -> f64 {
     ts.tv_sec as f64 + (ts.tv_nsec as f64) / 1e9
+}
+
+fn pcm_to_fd(p: &PCM) -> alsa::Result<std::os::unix::io::RawFd> {
+    use std::mem;
+    use alsa::PollDescriptors;
+    use alsa::Error;
+
+    let mut fds: [libc::pollfd; 1] = unsafe { mem::zeroed() };
+    let c = (p as &PollDescriptors).fill(&mut fds)?;
+    if c != 1 {
+        return Err(Error::unsupported("snd_pcm_poll_descriptors returned wrong number of fds"))
+    }
+    Ok(fds[0].fd)
 }
