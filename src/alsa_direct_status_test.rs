@@ -76,8 +76,8 @@ fn main() {
 
     let mut handle_p: Option<PCM> = None;
     let mut handle_c: Option<PCM> = None;
-    let mut sync_status_p: Option<SyncPtrStatus> = None;
-    let mut sync_status_c: Option<SyncPtrStatus> = None;
+    let mut pcm_fd_p: Option<i32> = None;
+    let mut pcm_fd_c: Option<i32> = None;
     let mut status_p: Option<Status> = None;
     let mut status_c: Option<Status> = None;
     let mut buffer_c = vec![0i16; (period_size * periods * CHANNELS) as usize];
@@ -95,13 +95,7 @@ fn main() {
             pcm.sw_params(&swp).unwrap();
         }
 
-        sync_status_p = Some(unsafe {
-            SyncPtrStatus::sync_ptr(
-                alsa::direct::pcm::pcm_to_fd(&pcm).unwrap(),
-                false,
-                None,
-                None).unwrap()
-        });
+        pcm_fd_p = Some(alsa::direct::pcm::pcm_to_fd(&pcm).unwrap());
         if cfg!(target_arch = "x86_64" ) {
             status_p = Some(Status::new(&pcm).unwrap());
         }
@@ -112,13 +106,7 @@ fn main() {
         let mut pcm = PCM::new(&args.flag_device, Direction::Capture, false).unwrap();
         set_params(&mut pcm, args.flag_sample_rate, period_size, periods);
 
-        sync_status_c = Some(unsafe {
-            SyncPtrStatus::sync_ptr(
-                alsa::direct::pcm::pcm_to_fd(&pcm).unwrap(),
-                false,
-                None,
-                None).unwrap()
-        });
+        pcm_fd_c = Some(alsa::direct::pcm::pcm_to_fd(&pcm).unwrap());
 
         if cfg!(target_arch = "x86_64" ) {
             status_c = Some(Status::new(&pcm).unwrap());
@@ -138,14 +126,14 @@ fn main() {
             if let Some(status) = status_c.as_ref() {
                 print_status(&status);
             }
-            if let Some(status) = sync_status_c.as_ref() {
-                print_sync_status(&status);
+            if let Some(pcm_fd) = pcm_fd_c {
+                print_sync_status(pcm_fd);
             }
             if let Some(status) = status_p.as_ref() {
                 print_status(&status);
             }
-            if let Some(status) = sync_status_p.as_ref() {
-                print_sync_status(&status);
+            if let Some(pcm_fd) = pcm_fd_p {
+                print_sync_status(pcm_fd);
             }
         };
     });
@@ -204,7 +192,15 @@ fn set_params(pcm: &mut PCM, sample_rate: u32, period_size: u32, periods: u32) {
     pcm.sw_params(&swp).unwrap();
 }
 
-fn print_sync_status(status: &SyncPtrStatus) {
+fn print_sync_status(pcm_fd: i32) {
+    let status = unsafe {
+        SyncPtrStatus::sync_ptr(
+            pcm_fd,
+            false,
+            None,
+            None).unwrap()
+    };
+
     eprint!("Sync Status: state: {:?}  ", status.state());
     eprintln!("htstamp: {:<18}  ", timespec_f64(status.htstamp()));
 }
