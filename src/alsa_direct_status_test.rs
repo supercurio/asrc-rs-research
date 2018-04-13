@@ -16,10 +16,11 @@ use docopt::Docopt;
 use alsa::{Direction, ValueOr};
 use alsa::pcm::{PCM, HwParams, Format, Access};
 use alsa::direct::pcm::Status;
+use alsa::direct::pcm::SyncPtrStatus;
 use libc::timespec;
 
 const USAGE: &str = "
-ALSA audio_time in Rust
+alsa-direct-status-test
 
 Usage:
   alsa-audio-time [-p -c -D <device> -r <Hz> -s <frames> -o <periods> -f <Hz>]
@@ -75,6 +76,8 @@ fn main() {
 
     let mut handle_p: Option<PCM> = None;
     let mut handle_c: Option<PCM> = None;
+    let mut sync_status_p: Option<SyncPtrStatus> = None;
+    let mut sync_status_c: Option<SyncPtrStatus> = None;
     let mut status_p: Option<Status> = None;
     let mut status_c: Option<Status> = None;
     let mut buffer_c = vec![0i16; (period_size * periods * CHANNELS) as usize];
@@ -92,14 +95,34 @@ fn main() {
             pcm.sw_params(&swp).unwrap();
         }
 
-        status_p = Some(Status::new(&pcm).unwrap());
+        sync_status_p = Some(unsafe {
+            SyncPtrStatus::sync_ptr(
+                alsa::direct::pcm::pcm_to_fd(&pcm).unwrap(),
+                false,
+                None,
+                None).unwrap()
+        });
+        if cfg!(target_arch = "x86_64" ) {
+            status_p = Some(Status::new(&pcm).unwrap());
+        }
         handle_p = Some(pcm);
     }
 
     if args.flag_capture {
         let mut pcm = PCM::new(&args.flag_device, Direction::Capture, false).unwrap();
         set_params(&mut pcm, args.flag_sample_rate, period_size, periods);
-        status_c = Some(Status::new(&pcm).unwrap());
+
+        sync_status_c = Some(unsafe {
+            SyncPtrStatus::sync_ptr(
+                alsa::direct::pcm::pcm_to_fd(&pcm).unwrap(),
+                false,
+                None,
+                None).unwrap()
+        });
+
+        if cfg!(target_arch = "x86_64" ) {
+            status_c = Some(Status::new(&pcm).unwrap());
+        }
         handle_c = Some(pcm);
     }
 
@@ -115,8 +138,14 @@ fn main() {
             if let Some(status) = status_c.as_ref() {
                 print_status(&status);
             }
+            if let Some(status) = sync_status_c.as_ref() {
+                print_sync_status(&status);
+            }
             if let Some(status) = status_p.as_ref() {
                 print_status(&status);
+            }
+            if let Some(status) = sync_status_p.as_ref() {
+                print_sync_status(&status);
             }
         };
     });
@@ -175,8 +204,13 @@ fn set_params(pcm: &mut PCM, sample_rate: u32, period_size: u32, periods: u32) {
     pcm.sw_params(&swp).unwrap();
 }
 
+fn print_sync_status(status: &SyncPtrStatus) {
+    eprint!("Sync Status: state: {:?}  ", status.state());
+    eprintln!("htstamp: {:<18}  ", timespec_f64(status.htstamp()));
+}
+
 fn print_status(status: &Status) {
-    eprint!("state: {:?}  ", status.state());
+    eprint!("Status:      state: {:?}  ", status.state());
     eprint!("htstamp: {:<18}  ", timespec_f64(status.htstamp()));
     eprintln!("audio_htstamp: {:<18}  ", timespec_f64(status.audio_htstamp()));
 }
